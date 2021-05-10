@@ -198,16 +198,18 @@ dependencies:
 
 - Reference: [Snakemake doc](https://snakemake.readthedocs.io/en/stable), [HISAT2 manual](http://daehwankimlab.github.io/hisat2/manual), [samtools manual](http://www.htslib.org/doc/samtools.html)
 
-- [Snakefile]()
+- [Snakefile](https://github.com/Mira0507/snakemake_hisat2/blob/master/Snakefile)
 
 ```
-
 #################################### Defined by users #################################
 configfile:"config/config_single.yaml"    # Sets path to the config file
-
 #######################################################################################
 
-THREADS=config["THREADS"]
+
+# This workflow requires fastq.gz files in fastq directory 
+# e.g. paired-end: DMSO_rep1_1.fastq.gz, DMSO_rep1_2.fastq.gz, Drug_rep1_1.fastq.gz, Drug_rep1_2.fastq.gz 
+#      single-end: DMSO_rep1_1.fastq.gz, Drug_rep1_1.fastq.gz
+
 
 shell.prefix('set -euo pipefail; ')
 shell.executable('/bin/bash')
@@ -217,123 +219,164 @@ rule all:
         expand("hisat2_output/{sample}.bam", sample=config['FASTQ_PREFIX'])
 
 
-
-rule align_hisat2: 
+rule get_reference:    
     """
-    This rule aligns the reads using HISAT2
+    This rule downloads reference files
     """
+    params:
+        gen_link=config['REFERENCE_LINK']['GENOME'][0],   # Gencode reference genome file link 
+        gen_name=config['REFERENCE_LINK']['GENOME'][1],   # Output reference genome location & name 
+        anno_link=config['REFERENCE_LINK']['ANNOTATION'][0],  # Gencode GTF (annotation) file link
+        anno_name=config['REFERENCE_LINK']['ANNOTATION'][1]   # Output GTF file location & name
     output:
-        expand("hisat2_output/{sample}.bam", sample=config['FASTQ_PREFIX']),
+        gen=expand("reference/{gen}", gen=config['REFERENCE_LINK']['GENOME'][2]),  # Decompressed reference genome file 
+        anno=expand("reference/{anno}", anno=config['REFERENCE_LINK']['ANNOTATION'][2])  # Decompressed GTF file
+    shell:
+        "set +o pipefail; "
+        "wget -c {params.gen_link} -O reference/{params.gen_name} && "
+        "wget -c {params.anno_link} -O reference/{params.anno_name} && "
+        "gzip -d reference/*.gz"
+
+rule index_hisat2:
+    """
+    This rule constructs HISAT2 index files
+    """
+    input: 
+        expand("reference/{gen}", gen=config['REFERENCE_LINK']['GENOME'][2])    # Decompressed reference genome file
+    output:
+        expand("reference/hisat2_index/hisat2_index.{number}.ht2", number=[x+1 for x in range(8)])   # HISAT2 indexing files
+    threads: 8
+    shell:
+        "set +o pipefail; "
+        "hisat2-build -f -o 4 "
+        "-p {threads} "
+        "--seed 67 "
+        "{input} "
+        "hisat2_index && "
+        "mv *.ht2 reference/hisat2_index"
+
+rule align_hisat2:    # Creates bam files in hisat2_output directory"
+    """
+    This rule aligns the reads using HISAT2    
+    """
+    input:
+        fastq=expand("fastq/{sample}_{end}.fastq.gz", sample=config['FASTQ_PREFIX'], end=config['END']),  # Gzipped FASTQ files
+        index=expand("reference/hisat2_index/hisat2_index.{number}.ht2", number=[x+1 for x in range(8)])  # HISAT2 indexing files
+    output:
+        expand("hisat2_output/{sample}.bam", sample=config['FASTQ_PREFIX']),   # Bam files
         temp(expand("hisat2_output/{sample}.sam", sample=config['FASTQ_PREFIX']))
     params:
-        indir=config['FASTQ_DIR'],
-        files=config["FASTQ_PREFIX"], 
-        read_ends=config['END'],
-        ext=config['FASTQ_EXT'],
-        index=config['INDEX_HISAT']
+        files=config["FASTQ_PREFIX"],  # e.g. Ctrl, Treatment
+        ext=config['FASTQ_EXT'],       # extension of the FASTQ files (e.g. .fastq.gz)
+        indexing=config['INDEX_HISAT'] # HISAT2 indexing location and file name prefix
+    threads: 8
     run:
         for i in range(len(params.files)):
             p=params.files[i]
-            r1= params.indir + params.files[i] + "_1" + params.ext 
+            r1= "fastq/" + params.files[i] + "_1" + params.ext 
             r2=""
             read="-U " + r1
-            if len(params.read_ends) == 2: 
-                r2= params.indir + params.files[i] + "_2" + params.ext  
+            if len(input.fastq) == 2 * len(params.files): 
+                r2= "fastq/" + params.files[i] + "_2" + params.ext  
                 read="-1 " + r1 + " -2 " + r2
-            shell("hisat2 -q -p {THREADS} "
+            shell("hisat2 -q -p {threads} "
                   "--seed 23 "
-                  "-x {params.index} "
+                  "--summary-file hisat2_output/summary_{p}.txt "
+                  "-x {params.indexing} "
                   "{read} "
                   "-S hisat2_output/{p}.sam && "
                   "samtools view -bS "
-                  "-@ {THREADS} "
+                  "-@ {threads} "
                   "hisat2_output/{p}.sam > hisat2_output/{p}.bam")
+
 ```
 
-- [config/config_single.yaml (single-end testing)]()
+- [config/config_single.yaml (single-end testing)](https://github.com/Mira0507/snakemake_hisat2/blob/master/config/config_single.yaml)
 
 
 ```yaml
 
 
-GTF: "reference/gencode.v36.primary_assembly.annotation.gtf" # Assigns path to .gtf file
-
-
-INDEX_HISAT: "/home/mira/Documents/programming/Bioinformatics/snakemake_star_hisat/reference/hisat2_index/hisat2_index" # Assigns hisat2 index files (e.g.reference/hisat2_index/hisat2_index.1.ht2, reference/hisat2_index/hisat2_index.2.ht2, ...)
-
-
-THREADS: 8     # Assigns the number of threads
-
-STAR_OUT: "star_output"  # Assigns STAR output directory
-
-HISAT_OUT: "hisat2_output"  # Assigns HISAT2 output directory
-
-FASTQ_DIR: 'fastq_se/'
-
-FASTQ_PREFIX:
-  - 'Ctrl'
-  - 'Treatment'
-
-
-
-FASTQ_EXT: '.fastq.gz'
-  
+###################### Sample info ######################
 
 END: 
   - 1
 
+
+
+FASTQ_PREFIX:
+  - DMSO_rep1
+  - DMSO_rep2
+  - DMSO_rep3
+  - SR0813_rep1
+  - SR0813_rep2
+  - SR0813_rep3
+
+
+###################### Reference info ######################
+
+
+REFERENCE_LINK:
+  GENOME: 
+    - 'ftp://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_37/GRCh38.primary_assembly.genome.fa.gz'
+    - 'GRCh38.primary_assembly.genome.fa.gz'
+    - 'GRCh38.primary_assembly.genome.fa'
+  ANNOTATION: 
+    - 'ftp://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_37/gencode.v37.primary_assembly.annotation.gtf.gz'
+    - 'gencode.v37.primary_assembly.annotation.gtf.gz'
+    - 'gencode.v37.primary_assembly.annotation.gtf'
+
+
+###################### Extra-setting info ######################
+
+INDEX_HISAT: "/home/mira/Documents/programming/Bioinformatics/snakemake_star_hisat/reference/hisat2_index/hisat2_index" # Assigns hisat2 index files (e.g.reference/hisat2_index/hisat2_index.1.ht2, reference/hisat2_index/hisat2_index.2.ht2, ...)
+
+FASTQ_EXT: '.fastq.gz'
+
+
 ```
 
 
-- [config/config_paired.yaml (paired-end testing)]()
+- [config/config_paired.yaml (paired-end testing)](https://github.com/Mira0507/snakemake_hisat2/blob/master/config/config_paired.yaml)
 
 
 ```yaml
 
-SAMPLE:
-  SRR8245179: Treated
-  SRR8245176: Untreated
 
-
-
-
-FASTQ_LIST:
-  - Treated_1
-  - Treated_2
-  - Untreated_1
-  - Untreated_2
+###################### Sample info ######################
 
 END: 
   - 1
   - 2
 
-
-SRA:
-  - SRR8245179
-  - SRR8245176
-
-
-
-GTF: "reference/gencode.v36.primary_assembly.annotation.gtf" # Assigns path to .gtf file
-
-INDEX_HISAT: "/home/mira/Documents/programming/Bioinformatics/snakemake_star_hisat/reference/hisat2_index/hisat2_index" # Assigns hisat2 index files (e.g.reference/hisat2_index/hisat2_index.1.ht2, reference/hisat2_index/hisat2_index.2.ht2, ...)
-
-
-
-THREADS: 8     # Assigns the number of threads
-
-STAR_OUT: "star_output"  # Assigns STAR output directory
-
-HISAT2_OUT: "hisat2_output"  # Assigns HISAT2 output directory
-
-FASTQ_DIR: 'fastq_pe/'
-
-FASTQ_EXT: '.fastq.gz'
-
 FASTQ_PREFIX:
   - Treated
   - Untreated
 
+
+
+
+###################### Reference info ######################
+
+
+REFERENCE_LINK:
+  GENOME: 
+    - 'ftp://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_37/GRCh38.primary_assembly.genome.fa.gz'
+    - 'GRCh38.primary_assembly.genome.fa.gz'
+    - 'GRCh38.primary_assembly.genome.fa'
+  ANNOTATION: 
+    - 'ftp://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_37/gencode.v37.primary_assembly.annotation.gtf.gz'
+    - 'gencode.v37.primary_assembly.annotation.gtf.gz'
+    - 'gencode.v37.primary_assembly.annotation.gtf'
+
+
+###################### Extra-setting info ######################
+
+INDEX_HISAT: "/home/mira/Documents/programming/Bioinformatics/snakemake_star_hisat/reference/hisat2_index/hisat2_index" # Assigns hisat2 index files (e.g.reference/hisat2_index/hisat2_index.1.ht2, reference/hisat2_index/hisat2_index.2.ht2, ...)
+
+FASTQ_EXT: '.fastq.gz'
+
+  
 
 ```
 
